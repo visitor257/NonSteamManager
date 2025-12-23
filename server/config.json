@@ -27,6 +27,15 @@
       "configToClient": {
         "zip": false
       }
+    },
+    {
+      "id": "Sample Game",
+      "name": "Sample Game",
+      "version": "0.1",
+      "directory": "./Sample Game",
+      "configToClient": {
+        "zip": false
+      }
     }
   ]
 }
