@@ -1,0 +1,32 @@
+{
+  "server": {
+    "host": "0.0.0.0",
+    "port": 8000,
+    "secret_key": "key8000",
+    "verify": true
+  },
+  "games": [
+    {
+      "id": "game1",
+      "name": "Sample Game 1",
+      "version": "1.0.0",
+      "description": "A sample game for testing",
+      "directory": "./games/game1"
+    },
+    {
+      "id": "game2",
+      "name": "Sample Game 2",
+      "version": "1.2.0",
+      "directory": "./games/game2"
+    },
+    {
+      "id": "Windows Games",
+      "name": "Windows Games",
+      "version": "win2000",
+      "directory": "D:\\Program Files (x86)\\Games\\Games",
+      "configToClient": {
+        "zip": false
+      }
+    }
+  ]
+}
