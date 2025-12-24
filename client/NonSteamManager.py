@@ -489,7 +489,7 @@ class SteamVDFManager:
                 self.vdf_data['shortcuts'] = {}
     
             next_key = self.get_next_key()
-            game_dir = Path(exe_path).parent
+            game_dir = Path(start_dir)#Path(exe_path).parent
     
             # === 1. 加载 .addSteam.json ===
             add_steam_file = game_dir / ".addSteam.json"
@@ -510,6 +510,7 @@ class SteamVDFManager:
     
             # === 3. 创建基础游戏数据（使用负数 appid）===
             basic_data = self._create_basic_game_data(app_name, exe_path, start_dir, final_icon)
+            print(basic_data)
             oldid = basic_data['appid']
             self.vdf_data['shortcuts'][next_key] = basic_data
             if not self.save_vdf():
@@ -603,6 +604,7 @@ class SteamVDFManager:
 
     def _create_basic_game_data(self, app_name: str, exe_path: str, start_dir: str = "", icon: str = "") -> Dict:
         """创建基本的游戏数据"""
+        start_dir=str(start_dir)
         if not start_dir:
             start_dir = os.path.dirname(exe_path)
 
@@ -746,11 +748,14 @@ class DownloadManager:
     """下载管理器"""
 
     def __init__(self):
-        self.downloads_dir = Path.home() / "Downloads" / "GameDownloads"
+        self.downloads_dir = Path.cwd() / "GameDownloads"
         self.downloads_dir.mkdir(parents=True, exist_ok=True)
 
         self.progress_file = ".downloads.json"
         self.downloads = self.load_downloads()
+
+        self.meta_dir = self.downloads_dir / ".game_meta"
+        self.meta_dir.mkdir(exist_ok=True)
 
     def load_downloads(self) -> Dict:
         """加载下载记录"""
@@ -773,24 +778,82 @@ class DownloadManager:
             print(f"保存下载记录失败: {e}")
 
     def get_downloaded_games(self) -> List[Dict]:
-        """获取已下载的游戏"""
+        """获取已下载的游戏，并自动同步 .game_meta"""
         games = []
-
+    
+        # --- 步骤 1: 扫描所有游戏目录 ---
+        existing_game_dirs = set()
         for game_dir in self.downloads_dir.iterdir():
-            if game_dir.is_dir():
-                # 检查目录是否包含游戏文件
-                exe_files = list(game_dir.rglob("*.exe"))
-                if exe_files:
-                    game_info = {
-                        'id': game_dir.name,
-                        'name': game_dir.name,
-                        'path': str(game_dir),
-                        'exe_path': str(exe_files[0]) if exe_files else "",
-                        'size': self.get_folder_size(game_dir),
-                        'downloaded_at': game_dir.stat().st_mtime
-                    }
-                    games.append(game_info)
-
+            if game_dir.is_dir() and not game_dir.name.startswith('.'):  # 忽略 .game_meta 等隐藏目录
+                existing_game_dirs.add(game_dir.name)
+    
+        # --- 步骤 2: 扫描所有 meta 文件 ---
+        existing_meta_files = set()
+        for meta_file in self.meta_dir.glob("*.json"):
+            if meta_file.is_file():
+                game_id = meta_file.stem  # 去掉 .json
+                existing_meta_files.add(game_id)
+    
+        # --- 步骤 3: 清理多余的 meta 文件 ---
+        for stale_id in (existing_meta_files - existing_game_dirs):
+            stale_file = self.meta_dir / f"{stale_id}.json"
+            try:
+                stale_file.unlink()
+                print(f"[Meta] 删除多余元数据: {stale_file}")
+            except Exception as e:
+                print(f"[Meta] 删除失败: {e}")
+    
+        # --- 步骤 4: 为缺失 meta 的游戏生成默认 meta ---
+        for missing_id in (existing_game_dirs - existing_meta_files):
+            game_dir = self.downloads_dir / missing_id
+            if not game_dir.exists():
+                continue
+    
+            # 扫描 .exe
+            exe_files = list(game_dir.rglob("*.exe"))
+            main_exe = str(exe_files[0].relative_to(game_dir)) if exe_files else ""
+    
+            default_meta = {
+                'id': missing_id,
+                'name': missing_id,
+                'version': 'unknown',
+                'mainEXE': main_exe,
+                'path': str(game_dir),
+                'downloaded_at': game_dir.stat().st_mtime
+            }
+    
+            meta_file = self.meta_dir / f"{missing_id}.json"
+            try:
+                with open(meta_file, 'w', encoding='utf-8') as f:
+                    json.dump(default_meta, f, indent=2, ensure_ascii=False)
+                print(f"[Meta] 补全缺失元数据: {meta_file}")
+            except Exception as e:
+                print(f"[Meta] 补全失败: {e}")
+    
+        # --- 步骤 5: 加载所有有效游戏信息 ---
+        for game_id in existing_game_dirs:
+            game_dir = self.downloads_dir / game_id
+            meta_file = self.meta_dir / f"{game_id}.json"
+    
+            game_info = {}
+            if meta_file.exists():
+                try:
+                    with open(meta_file, 'r', encoding='utf-8') as f:
+                        game_info = json.load(f)
+                except Exception as e:
+                    print(f"[Meta] 加载失败: {meta_file}, {e}")
+    
+            # 确保必要字段
+            game_info.update({
+                'id': game_info.get('id') or game_id,
+                'name': game_info.get('name') or game_id,
+                'path': str(game_dir),
+                'size': self.get_folder_size(game_dir),
+                'downloaded_at': game_dir.stat().st_mtime
+            })
+    
+            games.append(game_info)
+    
         return sorted(games, key=lambda x: x['downloaded_at'], reverse=True)
 
     def get_folder_size(self, path: Path) -> int:
@@ -1481,24 +1544,29 @@ class MainWindow(QMainWindow):
         self.update_downloaded_stats()
 
     def delete_downloaded_game(self, game: Dict):
-        """删除已下载的游戏"""
         game_path = Path(game['path'])
         if not game_path.exists():
             QMessageBox.warning(self, "警告", f"游戏目录不存在:\n{game_path}")
             return
     
         reply = QMessageBox.question(
-            self,
-            '确认删除',
+            self, '确认删除',
             f'确定要删除游戏 "{game["name"]}" 吗？\n\n路径: {game_path}',
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
         )
         if reply == QMessageBox.Yes:
             try:
                 import shutil
-                shutil.rmtree(game_path)  # 递归删除整个目录
-                self.refresh_downloaded_games()  # 刷新列表
+                shutil.rmtree(game_path)
+    
+                # ✅ 删除对应的 meta 文件
+                game_id = game.get('id') or game_path.name
+                meta_file = self.download_manager.meta_dir / f"{game_id}.json"
+                if meta_file.exists():
+                    meta_file.unlink()
+                    print(f"[Meta] 已删除元数据: {meta_file}")
+    
+                self.refresh_downloaded_games()
                 self.status_label.setText(f"已删除游戏: {game['name']}")
             except Exception as e:
                 QMessageBox.critical(self, "错误", f"删除失败:\n{str(e)}")
@@ -1846,8 +1914,34 @@ class MainWindow(QMainWindow):
         self.refresh_downloaded_games()
         self.status_label.setText("下载完成！")
         self.download_btn.setEnabled(True)
-        # 可稍等2秒再隐藏，让用户看到100%
         QTimer.singleShot(2000, lambda: self.download_progress_bar.setVisible(False))
+    
+        if hasattr(self, 'selected_game') and self.selected_game:
+            install_dir = Path(self.install_dir_input.text())
+            game_id = self.selected_game.get('id')
+            if not game_id:
+                # 尝试从路径推断（应与 downloads_dir 一致）
+                try:
+                    game_id = install_dir.relative_to(self.download_manager.downloads_dir).parts[0]
+                except:
+                    game_id = install_dir.name
+    
+            # ✅ 保存到下载目录内的 .game_meta/
+            meta_file = self.download_manager.meta_dir / f"{game_id}.json"
+            try:
+                safe_meta = {
+                    'id': game_id,
+                    'name': self.selected_game.get('name'),
+                    'version': self.selected_game.get('version'),
+                    'mainEXE': self.selected_game.get('mainEXE'),
+                    'path': str(install_dir),
+                    'downloaded_at': time.time()
+                }
+                with open(meta_file, 'w', encoding='utf-8') as f:
+                    json.dump(safe_meta, f, indent=2, ensure_ascii=False)
+                print(f"[Meta] 已保存游戏元数据: {meta_file}")
+            except Exception as e:
+                print(f"[Meta] 保存元数据失败: {e}")
 
     @Slot(str)
     def on_download_error(self, error_msg):
@@ -1898,38 +1992,71 @@ class MainWindow(QMainWindow):
             self.status_label.setText(f"已删除服务器: {server['name']}")
 
     def add_selected_to_steam(self):
-        """添加选中的游戏到Steam"""
+        """添加选中的游戏到Steam（实时读取元数据，避免缓存问题）"""
         if not self.current_vdf_path:
             QMessageBox.warning(self, "错误", "请先选择shortcuts.vdf文件")
             return
-
+    
         added_count = 0
         for i in range(self.downloaded_table.rowCount()):
+            if self.downloaded_table.isRowHidden(i):
+                continue
+    
             widget = self.downloaded_table.cellWidget(i, 0)
-            if widget and not self.downloaded_table.isRowHidden(i):
-                checkbox = widget.findChild(QCheckBox)
-                if checkbox and checkbox.isChecked():
-                    game = self.downloaded_game_data[i]
-
-                    # 查找可执行文件
-                    exe_path = game.get('exe_path', '')
-                    if not exe_path:
-                        exe_files = list(Path(game['path']).rglob("*.exe"))
-                        if exe_files:
-                            exe_path = str(exe_files[0])
-
-                    if exe_path and self.steam_manager.add_game(game['name'], exe_path):
-                        added_count += 1
-
-        # 在 add_selected_to_steam 中
+            if not widget:
+                continue
+    
+            checkbox = widget.findChild(QCheckBox)
+            if not (checkbox and checkbox.isChecked()):
+                continue
+    
+            # 从表格第4列（路径列）获取游戏目录
+            path_item = self.downloaded_table.item(i, 4)
+            if not path_item:
+                continue
+    
+            game_path_str = path_item.text()
+            game_dir = Path(game_path_str)
+    
+            # 读取 .game_meta.json
+            meta_file = self.download_manager.meta_dir / f"{game_dir.name}.json"
+            print(meta_file)
+            game_meta = {}
+            if meta_file.exists():
+                try:
+                    with open(meta_file, 'r', encoding='utf-8') as f:
+                        game_meta = json.load(f)
+                except Exception as e:
+                    print(f"[警告] 读取元数据失败: {meta_file}, {e}")
+    
+            # 游戏名称
+            name_item = self.downloaded_table.item(i, 1)
+            game_name = name_item.text() if name_item else game_dir.name
+    
+            # 确定 exe 路径
+            exe_path = ""
+            main_exe = game_meta.get('mainEXE')
+            print(main_exe)
+            if main_exe:
+                exe_candidate = game_dir / main_exe
+                if exe_candidate.exists():
+                    exe_path = str(exe_candidate)
+                else:
+                    print(f"[警告] mainEXE 文件不存在: {exe_candidate}")
+    
+            if not exe_path:
+                exe_files = list(game_dir.rglob("*.exe"))
+                if exe_files:
+                    exe_path = str(exe_files[0])
+    
+            if exe_path and self.steam_manager.add_game(game_name, exe_path, str(game_dir)):
+                added_count += 1
+    
         if added_count > 0:
             self.load_steam_games()
             self.status_label.setText(f"已添加 {added_count} 个游戏到Steam")
-        
-            # 检查是否有任何游戏走了 pending 流程（即 oldid >= 0）
-            # 但目前所有都是负数，所以通常不需要提示“不要关闭”
-            # 为兼容性，仍保留提示
-        
+    
+            # 提示
             msg = QMessageBox(self)
             msg.setWindowTitle("添加成功")
             msg.setText("添加完成，现可在Steam内启动游戏。\n"
@@ -1937,8 +2064,8 @@ class MainWindow(QMainWindow):
             msg.setIcon(QMessageBox.Information)
             msg.setStandardButtons(QMessageBox.Ok)
             msg.exec()
-        
-            # 仅当存在 pending 记录时才启动监听器
+    
+            # 启动 VDF 监听器（如果需要）
             pending_file = Path(self.current_vdf_path).parent / ".steam_pending.json"
             if pending_file.exists():
                 self.start_vdf_watcher()
