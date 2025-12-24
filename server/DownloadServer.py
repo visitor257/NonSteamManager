@@ -281,7 +281,8 @@ class GameDownloadServer:
                     'id': game.get('id'),
                     'name': game.get('name'),
                     'version': game.get('version'),
-                    'description': game.get('description')
+                    'description': game.get('description'),
+                    'mainEXE': game.get('mainEXE','')
                 }
 
                 # 包含configToClient字段

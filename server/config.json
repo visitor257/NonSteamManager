@@ -24,6 +24,7 @@
       "name": "Windows Games",
       "version": "win2000",
       "directory": "D:\\Program Files (x86)\\Games\\Games",
+      "mainEXE": "winmine.exe",
       "configToClient": {
         "zip": false
       }
@@ -33,6 +34,7 @@
       "name": "Sample Game",
       "version": "0.1",
       "directory": "./Sample Game",
+      "mainEXE": "Sample Game.exe",
       "configToClient": {
         "zip": false
       }
