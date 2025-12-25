@@ -4,7 +4,7 @@
 """
 
 import sys
-import os
+import os, shutil
 import json
 import time
 import hashlib
@@ -81,6 +81,7 @@ class DownloadWorker(QObject):
         self.api_key = api_key
         self.game = game
         self.install_dir = install_dir
+        self._should_abort = False
 
     def run(self):
         try:
@@ -98,15 +99,21 @@ class DownloadWorker(QObject):
             self.error.emit(str(e))
 
     def _on_progress(self, current, total):
+        if self._should_abort:
+            raise Exception("Download aborted by user")
         if total <= 0:
             pct = 100
         else:
             pct = int(current / total * 100)
-        # 只发送百分比（0-100），避免大整数溢出
         self.progress.emit(pct, 100)
 
     def _on_status(self, msg):
+        if self._should_abort:
+            raise Exception("Download aborted by user")
         self.status.emit(msg)
+
+    def abort(self):
+        self._should_abort = True
 
 
 # ==================== 现代化主题 ====================
@@ -886,6 +893,12 @@ class MainWindow(QMainWindow):
         self.vdf_watcher_timer = None
         self.vdf_last_hash = None
 
+        self.download_state = "idle"  # idle, downloading, paused
+        self.current_install_dir = None
+
+        self.download_thread = None
+        self.worker = None
+
     def setup_ui(self):
         """设置UI"""
         self.setWindowTitle("Non Steam Manager")
@@ -1270,12 +1283,44 @@ class MainWindow(QMainWindow):
 
         download_control_layout.addLayout(dir_layout)
 
-        # 下载按钮
-        self.download_btn = QPushButton("开始下载")
-        self.download_btn.setProperty("class", "primary")
-        self.download_btn.clicked.connect(self.start_download)
-        self.download_btn.setEnabled(False)
-        download_control_layout.addWidget(self.download_btn)
+        # ===== 下载控制按钮 =====
+        # 创建四个按钮（无包装）
+        self.download_start_btn = QPushButton("开始下载")
+        self.download_start_btn.setProperty("class", "primary")
+        self.download_start_btn.clicked.connect(self.start_download)
+        
+        self.download_pause_btn = QPushButton("暂停")
+        self.download_pause_btn.clicked.connect(self.pause_download)
+        
+        self.download_resume_btn = QPushButton("继续")
+        self.download_resume_btn.setProperty("class", "primary")
+        self.download_resume_btn.clicked.connect(self.resume_download)
+        
+        self.download_cancel_btn = QPushButton("取消")
+        self.download_cancel_btn.setProperty("class", "danger")
+        self.download_cancel_btn.clicked.connect(self.cancel_download)
+        
+        # 所有按钮初始隐藏（除开始）
+        self.download_pause_btn.setVisible(False)
+        self.download_resume_btn.setVisible(False)
+        self.download_cancel_btn.setVisible(False)
+        
+        # 将按钮放入同一个水平容器
+        button_container = QWidget()
+        button_container.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        button_container.setMinimumWidth(0)
+        button_layout = QHBoxLayout(button_container)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(8)
+        # button_container.setStyleSheet("background-color: rgba(255, 0, 0, 30);")  # 半透明红
+        button_layout.addWidget(self.download_start_btn,1)
+        button_layout.addWidget(self.download_pause_btn,1)
+        button_layout.addWidget(self.download_resume_btn,1)
+        button_layout.addWidget(self.download_cancel_btn,1)
+        button_layout.addStretch()
+        
+        # 作为单行加入主布局
+        download_control_layout.addWidget(button_container)
 
         # 下载进度
         self.download_progress_bar = QProgressBar()
@@ -1289,6 +1334,81 @@ class MainWindow(QMainWindow):
         layout.addWidget(download_control_group)
 
         self.tab_widget.addTab(widget, "下载")
+
+    def pause_download(self):
+        if self.download_state == "downloading" and self.worker:
+            self.worker.abort()
+            self.download_state = "paused"
+            self.show_download_buttons("paused")
+            self.status_label.setText("下载已暂停")
+            # 不要立即 quit 线程，等它自然退出（通过异常）
+
+    def resume_download(self):
+        if self.download_state == "paused":
+            self.start_download()  # 复用 start_download 逻辑（会检测 paused 状态）
+
+    def cancel_download(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("取消下载")
+        msg.setText("确定要取消当前下载吗？")
+        delete_cb = QCheckBox("同时删除已下载的文件")
+        delete_cb.setChecked(False)
+        msg.setCheckBox(delete_cb)
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+    
+        if msg.exec() == QMessageBox.Yes:
+            if self.worker:
+                self.worker.abort()
+            if self.download_thread and self.download_thread.isRunning():
+                self.download_thread.quit()
+                self.download_thread.wait(2000)
+    
+            if delete_cb.isChecked() and self.current_install_dir and self.current_install_dir.exists():
+                try:
+                    shutil.rmtree(self.current_install_dir)
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"删除失败:\n{str(e)}")
+    
+            self.reset_download_ui()
+
+    def closeEvent(self, event):
+        """安全关闭：等待下载线程退出"""
+        if self.download_thread is not None:
+            try:
+                if self.download_thread.isRunning():
+                    if self.worker:
+                        try:
+                            self.worker.abort()
+                        except RuntimeError:
+                            pass
+                    self.download_thread.quit()
+                    if not self.download_thread.wait(3000):
+                        self.download_thread.terminate()
+                        self.download_thread.wait()
+            except RuntimeError:
+                # QThread C++ 对象已删除，忽略
+                pass
+    
+        event.accept()
+
+    def show_download_buttons(self, state: str):
+        """根据状态显示对应按钮"""
+        self.download_start_btn.setVisible(state == "idle")
+        self.download_pause_btn.setVisible(state == "downloading")
+        self.download_resume_btn.setVisible(state == "paused")
+        self.download_cancel_btn.setVisible(state == "paused")
+
+    def pause_or_cancel_download(self):
+        if self.download_state == "downloading":
+            # 暂停：中断但保留文件
+            self.worker.abort()
+            self.download_state = "paused"
+            self.download_pause_btn.setText("继续下载")
+            self.status_label.setText("下载已暂停")
+        elif self.download_state == "paused":
+            # 继续
+            self.start_download()
 
     def create_settings_tab(self):
         """创建设置标签页"""
@@ -1854,89 +1974,77 @@ class MainWindow(QMainWindow):
     def prepare_download(self, game: Dict):
         """准备下载游戏"""
         self.selected_game = game
-        self.download_btn.setEnabled(True)
+        # self.download_btn.setEnabled(True)  # ← 删除这行
         default_path = self.download_manager.downloads_dir / game.get('id', 'game')
         self.install_dir_input.setText(str(default_path))
         self.status_label.setText(f"准备下载: {game.get('name')}")
+    
+        # 如果当前不在下载中，确保开始按钮可见
+        if self.download_state == "idle":
+            self.download_start_btn.setVisible(True)
+            self.download_pause_btn.setVisible(False)
 
     def start_download(self):
-        if not hasattr(self, 'selected_game'):
+        if not hasattr(self, 'selected_game') or not self.selected_game:
             return
 
-        # ✅ 显示进度控件
+        # === 安全检查线程状态 ===
+        thread_valid = False
+        if self.download_thread is not None:
+            try:
+                # 触发 C++ 对象有效性检查
+                _ = self.download_thread.isRunning()
+                thread_valid = True
+            except RuntimeError:
+                # C++ 对象已删除，清理引用
+                self.download_thread = None
+                self.worker = None
+
+        # ✅ 确保前一个线程已完全退出
+        if self.download_thread and self.download_thread.isRunning():
+            if self.worker:
+                self.worker.abort()
+            self.download_thread.quit()
+            self.download_thread.wait(3000)
+
+        install_dir = Path(self.install_dir_input.text())
+        self.current_install_dir = install_dir
+
+        # 检测未完成下载（仅首次）
+        if self.download_state == "idle" and install_dir.exists() and self.is_incomplete_download(install_dir):
+            reply = QMessageBox.question(...)
+            if reply == QMessageBox.Discard:
+                shutil.rmtree(install_dir)
+            elif reply == QMessageBox.Cancel:
+                return
+
+        self.download_state = "downloading"
+        self.show_download_buttons("downloading")
         self.download_progress_bar.setVisible(True)
         self.download_progress_bar.setValue(0)
         self.download_status_label.setText("准备下载...")
-        self.download_btn.setEnabled(False)  # 防止重复点击
     
-        install_dir = Path(self.install_dir_input.text())
-        game = self.selected_game
-
-        # ✅ 检测：目标目录是否存在但未完成
-        if install_dir.exists() and self.is_incomplete_download(install_dir):
-            reply = QMessageBox.question(
-                self, '未完成的下载',
-                f'检测到未完成的下载：\n{install_dir}\n\n'
-                f'请选择操作：',
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
-                QMessageBox.Cancel
-            )
-            if reply == QMessageBox.Save:
-                # 继续下载（不清除）
-                pass
-            elif reply == QMessageBox.Discard:
-                # 删除并重新开始
-                try:
-                    import shutil
-                    shutil.rmtree(install_dir)
-                    print(f"[Cleanup] 已删除不完整下载: {install_dir}")
-                except Exception as e:
-                    QMessageBox.critical(self, "错误", f"删除失败:\n{str(e)}")
-                    return
-            else:
-                # 取消操作
-                return
-    
-        # 优先从游戏自身获取服务器信息（用于“全部服务器”模式）
-        if '_server' in game:
-            server_info = game['_server']
-            server_url = server_info['url']
-            api_key = server_info['api_key']
+        # 启动下载线程（同原有逻辑）
+        server_info = self.selected_game.get('_server')
+        if server_info:
+            server_url, api_key = server_info['url'], server_info['api_key']
         else:
-            # 否则从下拉框获取（兼容单服务器模式）
             server_id = self.server_combo.currentData()
-            if not server_id or server_id == "all":
-                QMessageBox.warning(self, "错误", "请选择一个有效的服务器")
-                return
             server = self.server_manager.get_server(server_id)
-            if not server:
-                return
-            server_url = server['url']
-            api_key = server['api_key']
-
-        # 创建工作线程
-        self.download_thread = QThread()
-        self.worker = DownloadWorker(
-            server_url=server_url,
-            api_key=api_key,
-            game=game,
-            install_dir=install_dir
-        )
+            server_url, api_key = server['url'], server['api_key']
     
-        # ✅ 确保所有信号都连接
+        self.download_thread = QThread()
+        self.worker = DownloadWorker(server_url, api_key, self.selected_game, install_dir)
         self.worker.progress.connect(self.on_download_progress)
         self.worker.status.connect(self.on_download_status)
         self.worker.finished.connect(self.on_download_finished)
         self.worker.error.connect(self.on_download_error)
-    
-        # ✅ 关键：确保线程清理
         self.worker.finished.connect(self.download_thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.download_thread.finished.connect(self.download_thread.deleteLater)
-    
         self.download_thread.started.connect(self.worker.run)
         self.worker.moveToThread(self.download_thread)
-        self.download_thread.start()  # 启动线程
+        self.download_thread.start()
 
 
     @Slot(int, int)
@@ -1982,13 +2090,39 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Meta] 保存元数据失败: {e}")
 
+            self.reset_download_ui()
+            self.status_label.setText("下载完成！")
+
     @Slot(str)
     def on_download_error(self, error_msg):
-        self.download_status_label.setText(f"下载失败: {error_msg}")
-        QMessageBox.critical(self, "错误", error_msg)
-        self.download_btn.setEnabled(True)
-        self.download_progress_bar.setVisible(False)
+        is_user_abort = "aborted by user" in error_msg or "Download canceled" in error_msg
+    
+        if not is_user_abort:
+            QMessageBox.critical(self, "错误", error_msg)
+    
+        # 只有非用户主动中断才重置 UI；如果是暂停，则保持 paused 状态
+        if is_user_abort:
+            # 用户主动暂停/取消，不重置状态（由 pause/cancel 自行处理）
+            pass
+        else:
+            self.reset_download_ui()
 
+    def reset_download_ui(self):
+        if self.worker:
+            try:
+                self.worker.progress.disconnect(self.on_download_progress)
+                self.worker.status.disconnect(self.on_download_status)
+                self.worker.error.disconnect(self.on_download_error)
+            except Exception:
+                pass
+        # 👇 关键：主动置空，避免悬空引用
+        self.worker = None
+        self.download_thread = None  # ← 必须加这行！
+    
+        self.download_state = "idle"
+        self.show_download_buttons("idle")
+        self.download_progress_bar.setVisible(False)
+        self.download_status_label.setText("")
 
     def add_server(self):
         """添加服务器"""
