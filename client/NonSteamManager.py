@@ -98,7 +98,12 @@ class DownloadWorker(QObject):
             self.error.emit(str(e))
 
     def _on_progress(self, current, total):
-        self.progress.emit(current, total)
+        if total <= 0:
+            pct = 100
+        else:
+            pct = int(current / total * 100)
+        # 只发送百分比（0-100），避免大整数溢出
+        self.progress.emit(pct, 100)
 
     def _on_status(self, msg):
         self.status.emit(msg)
@@ -1899,11 +1904,8 @@ class MainWindow(QMainWindow):
 
     @Slot(int, int)
     def on_download_progress(self, current, total):
-        if total <= 0:
-            pct = 100
-        else:
-            pct = int(current / total * 100)
-        self.download_progress_bar.setValue(pct)
+        # current 现在是 0-100 的百分比
+        self.download_progress_bar.setValue(current)
     
     @Slot(str)
     def on_download_status(self, msg):
