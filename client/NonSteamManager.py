@@ -921,6 +921,18 @@ class MainWindow(QMainWindow):
         # 应用主题
         ModernTheme.apply(QApplication.instance())
 
+    def is_incomplete_download(self, game_dir: Path) -> bool:
+        """
+        判断目录是否为未完成的下载：
+        - 目录存在
+        - 但对应的 .game_meta/{id}.json 不存在
+        """
+        if not game_dir.exists():
+            return False
+        game_id = game_dir.name
+        meta_file = self.download_manager.meta_dir / f"{game_id}.json"
+        return not meta_file.exists()
+
     def refresh_current_server_view(self):
         """根据当前服务器选择刷新游戏列表"""
         server_id = self.server_combo.currentData()
@@ -1859,6 +1871,31 @@ class MainWindow(QMainWindow):
     
         install_dir = Path(self.install_dir_input.text())
         game = self.selected_game
+
+        # ✅ 检测：目标目录是否存在但未完成
+        if install_dir.exists() and self.is_incomplete_download(install_dir):
+            reply = QMessageBox.question(
+                self, '未完成的下载',
+                f'检测到未完成的下载：\n{install_dir}\n\n'
+                f'请选择操作：',
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+                QMessageBox.Cancel
+            )
+            if reply == QMessageBox.Save:
+                # 继续下载（不清除）
+                pass
+            elif reply == QMessageBox.Discard:
+                # 删除并重新开始
+                try:
+                    import shutil
+                    shutil.rmtree(install_dir)
+                    print(f"[Cleanup] 已删除不完整下载: {install_dir}")
+                except Exception as e:
+                    QMessageBox.critical(self, "错误", f"删除失败:\n{str(e)}")
+                    return
+            else:
+                # 取消操作
+                return
     
         # 优先从游戏自身获取服务器信息（用于“全部服务器”模式）
         if '_server' in game:
