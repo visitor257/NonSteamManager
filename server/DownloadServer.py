@@ -17,6 +17,22 @@ from fastapi.middleware.cors import CORSMiddleware
 import aiofiles
 from pydantic import BaseModel
 from typing import Dict, List, Optional, Any
+import urllib.parse
+
+def safe_filename(filename: str) -> str:
+    """
+    生成兼容 Content-Disposition 的安全文件名
+    返回: filename="xxx"; filename*=UTF-8''xxx
+    """
+    # ASCII 部分用于 fallback
+    ascii_name = filename.encode('ascii', errors='ignore').decode('ascii')
+    if not ascii_name:
+        ascii_name = "file"
+
+    # UTF-8 编码用于现代浏览器
+    utf8_encoded = urllib.parse.quote(filename.encode('utf-8'))
+
+    return f'filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_encoded}'
 
 # 配置日志
 logging.basicConfig(
@@ -458,7 +474,7 @@ class GameDownloadServer:
                 headers={
                     'Accept-Ranges': 'bytes',
                     'Content-Length': str(file_size),
-                    'Content-Disposition': f'attachment; filename="{full_path.name}"'
+                    'Content-Disposition': f'attachment; {safe_filename(full_path.name)}'
                 }
             )
 
@@ -574,7 +590,7 @@ class GameDownloadServer:
             'Content-Range': f'bytes {offset}-{file_size-1}/{file_size}',
             'Accept-Ranges': 'bytes',
             'Content-Length': str(file_size - offset),
-            'Content-Disposition': f'attachment; filename="{file_path.name}"'
+            'Content-Disposition': f'attachment; {safe_filename(file_path.name)}'
         }
 
         return StreamingResponse(
