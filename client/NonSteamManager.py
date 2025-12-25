@@ -2060,7 +2060,6 @@ class MainWindow(QMainWindow):
     def on_download_finished(self):
         self.refresh_downloaded_games()
         self.status_label.setText("下载完成！")
-        self.download_btn.setEnabled(True)
         QTimer.singleShot(2000, lambda: self.download_progress_bar.setVisible(False))
     
         if hasattr(self, 'selected_game') and self.selected_game:
@@ -2090,7 +2089,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"[Meta] 保存元数据失败: {e}")
 
-            self.reset_download_ui()
+            self.reset_download_ui(mode=1)
             self.status_label.setText("下载完成！")
 
     @Slot(str)
@@ -2107,7 +2106,7 @@ class MainWindow(QMainWindow):
         else:
             self.reset_download_ui()
 
-    def reset_download_ui(self):
+    def reset_download_ui(self,mode:int=0):
         if self.worker:
             try:
                 self.worker.progress.disconnect(self.on_download_progress)
@@ -2116,8 +2115,9 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         # 👇 关键：主动置空，避免悬空引用
-        self.worker = None
-        self.download_thread = None  # ← 必须加这行！
+        if mode==0:
+            self.worker = None
+            self.download_thread = None  # ← 必须加这行！
     
         self.download_state = "idle"
         self.show_download_buttons("idle")
